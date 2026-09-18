@@ -18,12 +18,29 @@ A small local app for learning French Sign Language (LSF) vocabulary using
 
 ## Setup
 
+Elixcopter uses [uv](https://docs.astral.sh/uv/) for dependency management (`pyproject.toml` + `uv.lock` are checked in).
+
+```bash
+uv venv
+uv sync
+uv run python app.py
+```
+
+- `uv venv` creates a local `.venv/`.
+- `uv sync` installs the exact locked dependencies into it.
+- `uv run python app.py` runs the app inside that environment, no manual activation needed.
+
+Then open http://localhost:5057 in your browser.
+
+<details>
+<summary>Without uv</summary>
+
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-Then open http://localhost:5057 in your browser.
+</details>
 
 Videos are downloaded into `media/videos/`, and flashcard data lives in
 `data/flashcards.db` (SQLite) — both are gitignored since they're local,
