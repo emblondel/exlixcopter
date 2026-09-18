@@ -280,6 +280,10 @@ main { max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
 .stat-pill.proficiency.weak { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
 .stat-pill.proficiency.strong { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 
+.stat-group { display: flex; flex-direction: column; gap: 6px; }
+.stat-group-label { font-size: 0.78rem; font-weight: 600; color: var(--new); }
+.stat-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
 .deck-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .deck-card {
   background: var(--paper-raised);
@@ -295,5 +299,8 @@ main { max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
 .deck-card-header { display: flex; justify-content: space-between; align-items: baseline; }
 .deck-card-header h3 { margin: 0; font-size: 1.05rem; }
 .deck-card .def { font-size: 0.88rem; color: var(--ink); opacity: 0.85; }
-.deck-card .meta-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.78rem; color: var(--new); }
+.deck-progress-row { display: flex; flex-direction: column; gap: 4px; }
+.deck-progress-item { display: flex; justify-content: space-between; align-items: center; }
+.deck-progress-label { font-size: 0.78rem; color: var(--new); }
+.deck-card .meta-row { display: flex; justify-content: flex-end; align-items: center; font-size: 0.78rem; color: var(--new); }
 .delete-btn { background: none; border: none; color: var(--warn); cursor: pointer; font-size: 0.8rem; }

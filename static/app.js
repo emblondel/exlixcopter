@@ -195,7 +195,7 @@ async function loadNextReview() {
   gradeButtons.hidden = true;
   revealBtn.hidden = false;
 
-  const res = await fetch("/api/review/next");
+  const res = await fetch(`/api/review/next?mode=${session.mode}`);
   const data = await res.json();
 
   if (!data.card) {
@@ -262,7 +262,7 @@ gradeButtons.addEventListener("click", async (e) => {
     await fetch(`/api/review/${currentCard.id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ grade: btn.dataset.grade }),
+      body: JSON.stringify({ grade: btn.dataset.grade, mode: session.mode }),
     });
     session.reviewed += 1;
     await loadNextReview();
@@ -277,6 +277,7 @@ const deckList = document.getElementById("deck-list");
 const deckStats = document.getElementById("deck-stats");
 
 const PROFICIENCY_ORDER = ["new", "learning", "weak", "strong"];
+const MODES = ["recognize", "produce"];
 
 async function loadDeck() {
   deckList.innerHTML = "Chargement…";
@@ -294,12 +295,9 @@ async function loadDeck() {
   cards.forEach((card) => deckList.appendChild(buildDeckCard(card)));
 }
 
-function renderDeckStats(cards) {
-  const counts = { new: 0, learning: 0, weak: 0, strong: 0 };
-  cards.forEach((card) => {
-    if (counts[card.proficiency] !== undefined) counts[card.proficiency] += 1;
-  });
+const MODE_LABEL = { recognize: "Vidéo → Mot", produce: "Mot → Signe" };
 
+function renderDeckStats(cards) {
   deckStats.innerHTML = "";
 
   const total = document.createElement("div");
@@ -307,11 +305,30 @@ function renderDeckStats(cards) {
   total.innerHTML = `<span class="stat-count">${cards.length}</span><span class="stat-label">carte(s) au total</span>`;
   deckStats.appendChild(total);
 
-  PROFICIENCY_ORDER.forEach((p) => {
-    const pill = document.createElement("div");
-    pill.className = `stat-pill proficiency ${p}`;
-    pill.innerHTML = `<span class="stat-count">${counts[p]}</span><span class="stat-label">${proficiencyLabel(p)}</span>`;
-    deckStats.appendChild(pill);
+  MODES.forEach((mode) => {
+    const group = document.createElement("div");
+    group.className = "stat-group";
+
+    const label = document.createElement("div");
+    label.className = "stat-group-label";
+    label.textContent = MODE_LABEL[mode];
+    group.appendChild(label);
+
+    const row = document.createElement("div");
+    row.className = "stat-row";
+    const counts = { new: 0, learning: 0, weak: 0, strong: 0 };
+    cards.forEach((card) => {
+      const p = card.progress[mode]?.proficiency;
+      if (counts[p] !== undefined) counts[p] += 1;
+    });
+    PROFICIENCY_ORDER.forEach((p) => {
+      const pill = document.createElement("div");
+      pill.className = `stat-pill proficiency ${p}`;
+      pill.innerHTML = `<span class="stat-count">${counts[p]}</span><span class="stat-label">${proficiencyLabel(p)}</span>`;
+      row.appendChild(pill);
+    });
+    group.appendChild(row);
+    deckStats.appendChild(group);
   });
 }
 
@@ -329,11 +346,7 @@ function buildDeckCard(card) {
   header.className = "deck-card-header";
   const h3 = document.createElement("h3");
   h3.textContent = card.word;
-  const badge = document.createElement("span");
-  badge.className = `badge proficiency ${card.proficiency}`;
-  badge.textContent = proficiencyLabel(card.proficiency);
   header.appendChild(h3);
-  header.appendChild(badge);
   el.appendChild(header);
 
   const def = document.createElement("div");
@@ -341,10 +354,26 @@ function buildDeckCard(card) {
   def.textContent = card.definition;
   el.appendChild(def);
 
+  const progressRow = document.createElement("div");
+  progressRow.className = "deck-progress-row";
+  MODES.forEach((mode) => {
+    const p = card.progress[mode];
+    const item = document.createElement("div");
+    item.className = "deck-progress-item";
+    const badge = document.createElement("span");
+    badge.className = `badge proficiency ${p.proficiency}`;
+    badge.textContent = proficiencyLabel(p.proficiency);
+    const label = document.createElement("span");
+    label.className = "deck-progress-label";
+    label.textContent = MODE_LABEL[mode];
+    item.appendChild(label);
+    item.appendChild(badge);
+    progressRow.appendChild(item);
+  });
+  el.appendChild(progressRow);
+
   const metaRow = document.createElement("div");
   metaRow.className = "meta-row";
-  const due = new Date(card.due_at);
-  metaRow.innerHTML = `<span>Due : ${due.toLocaleDateString("fr-FR")}</span>`;
   const delBtn = document.createElement("button");
   delBtn.className = "delete-btn";
   delBtn.textContent = "Supprimer";

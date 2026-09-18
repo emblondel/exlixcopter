@@ -86,16 +86,20 @@ def api_create_card():
         now = srs.now_iso()
         cur = conn.execute(
             """
-            INSERT INTO cards (
-                word, part_of_speech, definition, source_url, video_url, video_path,
-                created_at, ease_factor, interval_days, repetitions, lapses, due_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 2.5, 0, 0, 0, ?)
+            INSERT INTO cards (word, part_of_speech, definition, source_url, video_url, video_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (word, part_of_speech, definition, source_url, video_url, f"videos/{filename}", now, now),
+            (word, part_of_speech, definition, source_url, video_url, f"videos/{filename}", now),
         )
+        card_id = cur.lastrowid
+        for mode in db.MODES:
+            conn.execute(
+                "INSERT INTO progress (card_id, mode, due_at) VALUES (?, ?, ?)",
+                (card_id, mode, now),
+            )
         conn.commit()
-        card = conn.execute("SELECT * FROM cards WHERE id = ?", (cur.lastrowid,)).fetchone()
-        return jsonify(card_to_dict(card)), 201
+        card = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+        return jsonify(deck_card_to_dict(conn, card)), 201
     finally:
         conn.close()
 
@@ -105,7 +109,7 @@ def api_list_cards():
     conn = db.get_conn()
     try:
         rows = conn.execute("SELECT * FROM cards ORDER BY created_at DESC").fetchall()
-        return jsonify([card_to_dict(r) for r in rows])
+        return jsonify([deck_card_to_dict(conn, r) for r in rows])
     finally:
         conn.close()
 
@@ -129,19 +133,30 @@ def api_delete_card(card_id: int):
 
 @app.get("/api/review/next")
 def api_review_next():
+    mode = request.args.get("mode", "recognize")
+    if mode not in db.MODES:
+        return jsonify({"error": "mode must be one of recognize/produce"}), 400
+
     conn = db.get_conn()
     try:
         now = srs.now_iso()
         row = conn.execute(
-            "SELECT * FROM cards WHERE due_at <= ? ORDER BY due_at ASC LIMIT 1",
-            (now,),
+            """
+            SELECT cards.*, progress.ease_factor, progress.interval_days, progress.repetitions,
+                   progress.lapses, progress.due_at, progress.last_reviewed_at
+            FROM cards JOIN progress ON progress.card_id = cards.id
+            WHERE progress.mode = ? AND progress.due_at <= ?
+            ORDER BY progress.due_at ASC LIMIT 1
+            """,
+            (mode, now),
         ).fetchone()
         if not row:
             next_due = conn.execute(
-                "SELECT due_at FROM cards ORDER BY due_at ASC LIMIT 1"
+                "SELECT due_at FROM progress WHERE mode = ? ORDER BY due_at ASC LIMIT 1",
+                (mode,),
             ).fetchone()
             return jsonify({"card": None, "next_due_at": next_due["due_at"] if next_due else None})
-        return jsonify({"card": card_to_dict(row), "next_due_at": None})
+        return jsonify({"card": review_card_to_dict(row), "next_due_at": None})
     finally:
         conn.close()
 
@@ -150,21 +165,26 @@ def api_review_next():
 def api_review_submit(card_id: int):
     data = request.get_json(force=True)
     grade = data.get("grade")
+    mode = data.get("mode", "recognize")
     if grade not in srs.GRADE_QUALITY:
         return jsonify({"error": "grade must be one of again/hard/good/easy"}), 400
+    if mode not in db.MODES:
+        return jsonify({"error": "mode must be one of recognize/produce"}), 400
 
     conn = db.get_conn()
     try:
-        row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM progress WHERE card_id = ? AND mode = ?", (card_id, mode)
+        ).fetchone()
         if not row:
             return jsonify({"error": "not found"}), 404
 
         result = srs.schedule(grade, row["ease_factor"], row["interval_days"], row["repetitions"])
         conn.execute(
             """
-            UPDATE cards SET ease_factor=?, interval_days=?, repetitions=?, due_at=?,
-                              last_reviewed_at=?, lapses = lapses + ?
-            WHERE id=?
+            UPDATE progress SET ease_factor=?, interval_days=?, repetitions=?, due_at=?,
+                                 last_reviewed_at=?, lapses = lapses + ?
+            WHERE card_id=? AND mode=?
             """,
             (
                 result["ease_factor"],
@@ -174,11 +194,20 @@ def api_review_submit(card_id: int):
                 result["last_reviewed_at"],
                 result["lapse"],
                 card_id,
+                mode,
             ),
         )
         conn.commit()
-        updated = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
-        return jsonify(card_to_dict(updated))
+        updated = conn.execute(
+            """
+            SELECT cards.*, progress.ease_factor, progress.interval_days, progress.repetitions,
+                   progress.lapses, progress.due_at, progress.last_reviewed_at
+            FROM cards JOIN progress ON progress.card_id = cards.id
+            WHERE cards.id = ? AND progress.mode = ?
+            """,
+            (card_id, mode),
+        ).fetchone()
+        return jsonify(review_card_to_dict(updated))
     finally:
         conn.close()
 
@@ -188,10 +217,33 @@ def media(filename: str):
     return send_from_directory(BASE_DIR / "media", filename)
 
 
-def card_to_dict(row) -> dict:
+def review_card_to_dict(row) -> dict:
+    """Flat shape used during an active review session (single mode's progress)."""
     d = dict(row)
     d["proficiency"] = srs.proficiency(row["ease_factor"], row["repetitions"], row["lapses"])
     d["video_src"] = f"/media/{row['video_path']}"
+    return d
+
+
+def deck_card_to_dict(conn, row) -> dict:
+    """Shape used for the deck listing: card info plus both modes' progress."""
+    d = dict(row)
+    d["video_src"] = f"/media/{row['video_path']}"
+    progress_rows = conn.execute(
+        "SELECT * FROM progress WHERE card_id = ?", (row["id"],)
+    ).fetchall()
+    progress = {}
+    for p in progress_rows:
+        progress[p["mode"]] = {
+            "ease_factor": p["ease_factor"],
+            "interval_days": p["interval_days"],
+            "repetitions": p["repetitions"],
+            "lapses": p["lapses"],
+            "due_at": p["due_at"],
+            "last_reviewed_at": p["last_reviewed_at"],
+            "proficiency": srs.proficiency(p["ease_factor"], p["repetitions"], p["lapses"]),
+        }
+    d["progress"] = progress
     return d
 
 
