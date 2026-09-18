@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Elixcopter — Apprendre la LSF</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">✋</span>
+    <span class="brand-name">Elixcopter</span>
+  </div>
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="add">Ajouter un mot</button>
+    <button class="tab-btn" data-tab="review">Réviser</button>
+    <button class="tab-btn" data-tab="deck">Mes cartes</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-add" class="tab-panel active">
+    <form id="search-form" class="search-form">
+      <input id="search-input" type="text" placeholder="Chercher un mot (ex : crier)" autocomplete="off" required>
+      <button type="submit">Chercher</button>
+    </form>
+    <div id="search-status" class="status"></div>
+    <div id="suggestions" class="suggestions"></div>
+    <div id="results" class="results-grid"></div>
+  </section>
+
+  <section id="tab-review" class="tab-panel">
+    <div id="review-setup" class="review-setup">
+      <h2>Nouvelle session</h2>
+      <div class="setup-group">
+        <label class="setup-label">Mode</label>
+        <div class="mode-choice">
+          <label class="mode-option">
+            <input type="radio" name="mode" value="recognize" checked>
+            <span class="mode-title">Vidéo → Mot</span>
+            <span class="mode-desc">Regardez le signe, devinez le mot.</span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="mode" value="produce">
+            <span class="mode-title">Mot → Signe</span>
+            <span class="mode-desc">Lisez le mot, essayez de faire le signe, puis vérifiez.</span>
+          </label>
+        </div>
+      </div>
+      <div class="setup-group">
+        <label class="setup-label" for="session-size">Nombre de cartes</label>
+        <select id="session-size">
+          <option value="10">10</option>
+          <option value="20">20</option>
+          <option value="30">30</option>
+          <option value="all">Toutes les cartes dues</option>
+        </select>
+      </div>
+      <button id="start-session-btn" class="save-btn">Commencer</button>
+    </div>
+
+    <div id="review-empty" class="empty-state" hidden>
+      <p>Aucune carte à réviser pour le moment 🎉</p>
+      <p id="next-due-info" class="muted"></p>
+      <button id="back-to-setup-btn" class="reveal-btn">Retour</button>
+    </div>
+
+    <div id="review-session-complete" class="empty-state" hidden>
+      <p id="session-complete-text"></p>
+      <button id="new-session-btn" class="save-btn">Nouvelle session</button>
+    </div>
+
+    <div id="review-card" class="review-card" hidden>
+      <div class="review-meta">
+        <span id="session-progress" class="badge"></span>
+        <span id="review-pos" class="badge"></span>
+        <span id="review-proficiency" class="badge proficiency"></span>
+      </div>
+
+      <div id="review-media">
+        <video id="review-video" controls autoplay muted playsinline hidden></video>
+        <div id="review-video-placeholder" class="video-placeholder" hidden>
+          <span>🤟</span>
+          <p>Essayez de faire le signe, puis révélez la vidéo pour vérifier.</p>
+        </div>
+      </div>
+
+      <h2 id="review-word" hidden></h2>
+      <p id="review-definition" class="definition" hidden></p>
+
+      <button id="reveal-btn" class="reveal-btn">Afficher la réponse</button>
+      <div id="grade-buttons" class="grade-buttons" hidden>
+        <button data-grade="again" class="grade again">À revoir</button>
+        <button data-grade="hard" class="grade hard">Difficile</button>
+        <button data-grade="good" class="grade good">Bien</button>
+        <button data-grade="easy" class="grade easy">Facile</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-deck" class="tab-panel">
+    <div id="deck-stats" class="deck-stats"></div>
+    <div id="deck-list" class="deck-list"></div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
