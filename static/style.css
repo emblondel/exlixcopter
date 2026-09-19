@@ -261,7 +261,9 @@ main { max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
 .grade:hover { filter: brightness(1.08); }
 .grade-buttons.disabled { pointer-events: none; opacity: 0.6; }
 
-.deck-stats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
+.deck-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
+.deck-stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 0; flex: 1; }
+.backup-btn { text-decoration: none; white-space: nowrap; flex-shrink: 0; }
 .stat-pill {
   display: flex;
   align-items: baseline;

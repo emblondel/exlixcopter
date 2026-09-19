@@ -1,8 +1,13 @@
+import io
 import re
+import sqlite3
+import tempfile
 import unicodedata
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 
 import db
 import elix_scraper
@@ -215,6 +220,44 @@ def api_review_submit(card_id: int):
 @app.get("/media/<path:filename>")
 def media(filename: str):
     return send_from_directory(BASE_DIR / "media", filename)
+
+
+@app.get("/api/backup")
+def api_backup():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        if db.DB_PATH.exists():
+            zf.writestr("data/flashcards.db", _consistent_db_snapshot())
+        for video_file in sorted(VIDEO_DIR.glob("*.mp4")):
+            zf.write(video_file, arcname=f"media/videos/{video_file.name}")
+
+    buffer.seek(0)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return send_file(
+        buffer,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"elixcopter-backup-{timestamp}.zip",
+    )
+
+
+def _consistent_db_snapshot() -> bytes:
+    """Copy the SQLite file via the backup API rather than reading its bytes
+    directly, so a concurrent write from another request can't land us a
+    torn/inconsistent copy.
+    """
+    source = sqlite3.connect(db.DB_PATH)
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir) / "flashcards.db"
+            dest = sqlite3.connect(tmp_path)
+            try:
+                source.backup(dest)
+            finally:
+                dest.close()
+            return tmp_path.read_bytes()
+    finally:
+        source.close()
 
 
 def review_card_to_dict(row) -> dict:
