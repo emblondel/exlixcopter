@@ -25,6 +25,29 @@
       <input id="search-input" type="text" placeholder="Chercher un mot (ex : crier)" autocomplete="off" required>
       <button type="submit">Chercher</button>
     </form>
+    <button id="show-list-mode-btn" class="link-btn">📋 Chercher une liste de mots</button>
+
+    <div id="list-setup" class="list-setup" hidden>
+      <label class="setup-label" for="word-list-input">Liste de mots (un par ligne, ou séparés par des virgules)</label>
+      <textarea id="word-list-input" rows="6" placeholder="crier&#10;bonjour&#10;merci&#10;..."></textarea>
+      <div class="list-setup-actions">
+        <button id="start-list-btn" class="save-btn">Commencer</button>
+        <button id="cancel-list-btn" class="link-btn">Annuler</button>
+      </div>
+    </div>
+
+    <div id="list-queue-bar" class="list-queue-bar" hidden>
+      <div class="list-queue-info">
+        <span id="list-queue-progress" class="badge"></span>
+        <span id="list-queue-word" class="list-queue-word"></span>
+      </div>
+      <div class="list-queue-actions">
+        <button id="list-prev-btn" class="reveal-btn">◀ Précédent</button>
+        <button id="list-next-btn" class="save-btn">Suivant ▶</button>
+        <button id="list-quit-btn" class="link-btn">Quitter la liste</button>
+      </div>
+    </div>
+
     <div id="search-status" class="status"></div>
     <div id="suggestions" class="suggestions"></div>
     <div id="results" class="results-grid"></div>
@@ -58,6 +81,24 @@
         </select>
       </div>
       <button id="start-session-btn" class="save-btn">Commencer</button>
+
+      <details class="proficiency-legend">
+        <summary>ℹ️ Que signifient les statuts des cartes ?</summary>
+        <dl>
+          <dt><span class="badge proficiency new">Nouveau</span></dt>
+          <dd>La carte n'a encore jamais été validée dans ce sens de révision : soit elle vient d'être ajoutée, soit vous avez toujours répondu « À revoir » jusqu'ici.</dd>
+
+          <dt><span class="badge proficiency learning">En cours</span></dt>
+          <dd>Elle a été validée au moins une fois, sans être ni fragile ni acquise pour l'instant — c'est l'état par défaut pendant l'apprentissage.</dd>
+
+          <dt><span class="badge proficiency weak">Fragile</span></dt>
+          <dd>Elle a été ratée (« À revoir ») au moins 2 fois au total, ou jugée difficile trop souvent — elle revient plus fréquemment pour être retravaillée.</dd>
+
+          <dt><span class="badge proficiency strong">Acquis</span></dt>
+          <dd>Elle a été validée au moins 3 fois de suite avec de bonnes réponses — vous la connaissez bien, elle revient de moins en moins souvent.</dd>
+        </dl>
+        <p class="legend-note">Chaque sens de révision (Vidéo → Mot et Mot → Signe) a son propre statut : bien connaître un mot dans un sens ne veut pas dire le connaître dans l'autre.</p>
+      </details>
     </div>
 
     <div id="review-empty" class="empty-state" hidden>

@@ -24,6 +24,99 @@ searchForm.addEventListener("submit", (e) => {
   runSearch(searchInput.value.trim());
 });
 
+// ---------- Word list mode ----------
+const showListModeBtn = document.getElementById("show-list-mode-btn");
+const listSetup = document.getElementById("list-setup");
+const wordListInput = document.getElementById("word-list-input");
+const startListBtn = document.getElementById("start-list-btn");
+const cancelListBtn = document.getElementById("cancel-list-btn");
+
+const listQueueBar = document.getElementById("list-queue-bar");
+const listQueueProgress = document.getElementById("list-queue-progress");
+const listQueueWord = document.getElementById("list-queue-word");
+const listPrevBtn = document.getElementById("list-prev-btn");
+const listNextBtn = document.getElementById("list-next-btn");
+const listQuitBtn = document.getElementById("list-quit-btn");
+
+let wordQueue = null; // { words: string[], index: number }
+
+showListModeBtn.addEventListener("click", () => {
+  searchForm.hidden = true;
+  showListModeBtn.hidden = true;
+  listSetup.hidden = false;
+  wordListInput.focus();
+});
+
+cancelListBtn.addEventListener("click", () => {
+  listSetup.hidden = true;
+  searchForm.hidden = false;
+  showListModeBtn.hidden = false;
+});
+
+startListBtn.addEventListener("click", () => {
+  const words = parseWordList(wordListInput.value);
+  if (words.length === 0) return;
+  wordQueue = { words, index: 0 };
+  listSetup.hidden = true;
+  showListModeBtn.hidden = true;
+  listQueueBar.hidden = false;
+  goToQueueIndex(0);
+});
+
+function parseWordList(raw) {
+  const seen = new Set();
+  const words = [];
+  raw
+    .split(/[\n,]/)
+    .map((w) => w.trim().toLowerCase())
+    .filter(Boolean)
+    .forEach((w) => {
+      if (!seen.has(w)) {
+        seen.add(w);
+        words.push(w);
+      }
+    });
+  return words;
+}
+
+function goToQueueIndex(i) {
+  wordQueue.index = i;
+  const { words, index } = wordQueue;
+  listQueueProgress.textContent = `${index + 1} / ${words.length}`;
+  listQueueWord.textContent = words[index];
+  listPrevBtn.disabled = index === 0;
+  listNextBtn.textContent = index === words.length - 1 ? "Terminer ✔" : "Suivant ▶";
+  runSearch(words[index]);
+}
+
+listPrevBtn.addEventListener("click", () => {
+  if (!wordQueue || wordQueue.index === 0) return;
+  goToQueueIndex(wordQueue.index - 1);
+});
+
+listNextBtn.addEventListener("click", () => {
+  if (!wordQueue) return;
+  if (wordQueue.index < wordQueue.words.length - 1) {
+    goToQueueIndex(wordQueue.index + 1);
+  } else {
+    quitList("Liste terminée 🎉");
+  }
+});
+
+listQuitBtn.addEventListener("click", () => quitList());
+
+function quitList(message) {
+  wordQueue = null;
+  listQueueBar.hidden = true;
+  searchForm.hidden = false;
+  showListModeBtn.hidden = false;
+  wordListInput.value = "";
+  suggestionsEl.innerHTML = "";
+  resultsEl.innerHTML = "";
+  searchStatus.textContent = message || "";
+  searchStatus.classList.remove("error");
+}
+
 async function runSearch(word) {
   if (!word) return;
   searchInput.value = word;
