@@ -18,7 +18,7 @@
 8. [Epic D — Save a sign as a flashcard](#8-epic-d--save-a-sign-as-a-flashcard)
 9. [Epic E — Review session (spaced repetition)](#9-epic-e--review-session-spaced-repetition)
 10. [Epic F — Browse & manage my cards](#10-epic-f--browse--manage-my-cards)
-11. [Epic G — Back up my data](#11-epic-g--back-up-my-data)
+11. [Epic G — Back up my data](#11-epic-g--back-up-my-data) — *functional & technical backup format*
 12. [Epic H — Upgrading data from an earlier version](#12-epic-h--upgrading-data-from-an-earlier-version)
 13. [Domain model](#13-domain-model)
 14. [Scheduling algorithm (SM‑2 variant)](#14-scheduling-algorithm-sm2-variant)
@@ -335,16 +335,241 @@ Each card shows badges:
 
 ## 11. Epic G — Back up my data
 
-### US‑G1 — Download a full backup
-> *As a learner, I want a single file containing my whole deck and progress, so I can keep it safe or move it to another computer.*
+This section is the full **functional and technical** specification of the backup feature and of the backup archive format. Unlike the rest of this document, it is deliberately precise about the file format, because a backup has to be readable by any future implementation (including a re‑implementation in another technology).
+
+### 11.1 Functional specification
+
+#### US‑G1 — Download a full backup
+> *As a learner, I want a single file containing my whole deck and progress, so I can keep it safe.*
 
 **Acceptance criteria**
-- In **Mes cartes**, a button **"⬇ Télécharger une sauvegarde"** triggers a download.
-- The download is a **ZIP archive** named `elixcopter-backup-YYYYMMDD-HHMMSS.zip` (UTC timestamp).
-- Contents:
-  - `data/flashcards.db` — a **consistent snapshot** of the card/progress store (taken in a way that cannot capture a half‑written state if a write happens concurrently); omitted if the store does not exist yet;
-  - `media/videos/*.mp4` — every locally stored video, in name order.
-- The archive layout mirrors the local data layout, so restoring = extracting it into the app's directory (there is **no in‑app restore**; see [§21](#21-observed-gaps-quirks--open-questions)).
+- In **Mes cartes**, the toolbar shows a button **"⬇ Télécharger une sauvegarde"**.
+- One click starts a browser download right away. There is no confirmation, no options dialog and no progress indicator.
+- The downloaded file is named `elixcopter-backup-YYYYMMDD-HHMMSS.zip`, with the export time in **UTC** (e.g. `elixcopter-backup-20261106-082209.zip`).
+- The backup contains **everything needed to rebuild the learner's state**:
+  - every card (word, part of speech, definition, source link, original video URL, local video reference, creation time);
+  - the learning progress of every card **in both review directions** (ease, interval, repetitions, lapses, next due time, last review time);
+  - every locally stored sign video.
+- The backup does **not** contain the application itself, any settings, or anything fetched from Elix other than the saved videos.
+- A backup can be taken at any time, including while other actions (saving a card, grading) happen. The card/progress data in it is always internally consistent (see [§11.2.6](#1126-consistency-guarantees)).
+- Taking a backup changes nothing in the learner's data.
+
+#### US‑G2 — Restore a backup
+> *As a learner, I want to put a backup back in place after a problem, getting exactly the state I had at backup time.*
+
+**Current behaviour: restore is manual**; the app has no import screen. The procedure is:
+1. Stop the application.
+2. Extract the archive into the application's directory, overwriting the existing `data/` and `media/videos/` content.
+3. Start the application again.
+
+Restoring **replaces** the current state; it does not merge. Cards created after the backup are lost from the data store. Their video files are only removed if the learner empties `media/videos/` before extracting; otherwise they stay behind as orphan files.
+
+#### US‑G3 — Move my deck to another computer
+> *As a learner, I want to continue on another machine with my cards and progress intact.*
+
+Same procedure as US‑G2, on a fresh installation. Because due times are stored as absolute UTC times, cards that were due stay due, and reviews resume exactly where they stopped, whatever the new machine's time zone.
+
+#### Functional rules summary
+
+| Rule | Behaviour |
+|---|---|
+| Scope | Whole deck, both directions, all videos. No partial or selective backup. |
+| Trigger | Manual, on demand. No automatic or scheduled backups. |
+| Destination | The browser's download location. |
+| Restore | Manual extraction; full replacement (no merge). |
+| Empty deck | Allowed: the archive then holds just an empty data store, or is completely empty if the store has never been created. |
+| Privacy | The archive is not encrypted or password‑protected. |
+
+### 11.2 Technical specification of the backup archive
+
+#### 11.2.1 Delivery
+
+| Item | Value |
+|---|---|
+| Operation | `GET /api/backup` (no parameters, no body) |
+| Success status | `200` |
+| `Content-Type` | `application/zip` |
+| `Content-Disposition` | `attachment; filename=elixcopter-backup-YYYYMMDD-HHMMSS.zip` (UTC) |
+| Error cases | None specific; any unexpected failure is a generic server error. |
+| Generation | The whole archive is built in full before it is sent, not streamed while being built. Memory use is roughly the total size of the videos. |
+
+#### 11.2.2 Container format
+
+| Property | Value |
+|---|---|
+| Format | Standard **ZIP** archive (PKWARE APPNOTE), readable by common unzip tools |
+| Compression | **DEFLATE** for every entry |
+| Encryption | None |
+| Large archives | ZIP64 extensions are used automatically when sizes exceed classic ZIP limits |
+| Path separator | `/` (forward slash); all paths relative, no leading `/`, no `..` |
+| Directory entries | **None**: only file entries are stored, and directories are implied by the paths |
+| File‑name encoding | ASCII in practice: the store name is fixed, and video names come from an ASCII slug ([§8 US‑D3](#us-d3--keep-the-video-available-offline)) |
+| Entry order | 1) `data/flashcards.db` (if present), 2) videos sorted by file name ascending |
+| Entry timestamps | Store entry: export time (machine local time). Video entries: each file's last‑modified time. Informational only. |
+| Manifest / version file | **None** (see [§11.2.8](#1128-versioning--compatibility)) |
+
+#### 11.2.3 Archive layout
+
+```
+elixcopter-backup-20261106-082209.zip
+├── data/
+│   └── flashcards.db            ← card & progress store (0 or 1 entry)
+└── media/
+    └── videos/
+        ├── crier-1.mp4          ← 0..n sign videos
+        ├── crier-2.mp4
+        └── bonjour-1.mp4
+```
+
+The layout mirrors the application's own data directory, so extracting the archive at the application root restores it in place.
+
+| Entry | Presence | Content |
+|---|---|---|
+| `data/flashcards.db` | Present if the store exists. It always does once the app has started, so it is absent only if the app never initialised. | Snapshot of the store ([§11.2.4](#1124-entry-dataflashcardsdb)) |
+| `media/videos/*.mp4` | One entry per `.mp4` file directly inside the local videos folder (subfolders not included; other extensions ignored) | Video bytes ([§11.2.5](#1125-entries-mediavideosmp4)) |
+
+#### 11.2.4 Entry `data/flashcards.db`
+
+**File format:** a complete, self‑contained **SQLite 3 database file**. It has no side files: no `-wal`, `-shm` or `-journal` file is needed or included. It is produced through SQLite's online‑backup mechanism, not by copying the raw file, so it is a consistent point‑in‑time image. Text is UTF‑8. `user_version` is `0`; there is no schema version marker.
+
+**Schema** (exact definition, current format, called "v2" below):
+
+```sql
+CREATE TABLE cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word TEXT NOT NULL,
+    part_of_speech TEXT,
+    definition TEXT,
+    source_url TEXT,
+    video_url TEXT NOT NULL,
+    video_path TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE progress (
+    card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL CHECK(mode IN ('recognize', 'produce')),
+    ease_factor REAL NOT NULL DEFAULT 2.5,
+    interval_days REAL NOT NULL DEFAULT 0,
+    repetitions INTEGER NOT NULL DEFAULT 0,
+    lapses INTEGER NOT NULL DEFAULT 0,
+    due_at TEXT NOT NULL,
+    last_reviewed_at TEXT,
+    PRIMARY KEY (card_id, mode)
+);
+```
+
+The file also contains SQLite's internal `sqlite_sequence` table. It records the highest card id ever assigned, so ids of deleted cards are never reused after a restore.
+
+**Column encoding — `cards`**
+
+| Column | Storage | Encoding / semantics | Example |
+|---|---|---|---|
+| `id` | INTEGER | Card identifier, ≥ 1, never reused | `12` |
+| `word` | TEXT, non‑empty | Headword as written in the Elix entry title | `crier` |
+| `part_of_speech` | TEXT, may be `''` | Elix abbreviation | `v.` |
+| `definition` | TEXT, may be `''` | Meaning heading text | `Pousser des cris.` |
+| `source_url` | TEXT | Absolute URL of the meaning on Elix (or the word page) | `https://dico.elix-lsf.fr/dictionnaire/crier` |
+| `video_url` | TEXT, non‑empty | Absolute URL of the original video on Elix; unique across rows (enforced by the app, not by a database constraint) | `https://…/video.mp4` |
+| `video_path` | TEXT, non‑empty | Path of the local video **relative to the `media/` folder**, always `videos/<file>.mp4` | `videos/crier-1.mp4` |
+| `created_at` | TEXT | Timestamp (format below) | `2026-11-06T08:22:09.169304+00:00` |
+
+**Column encoding — `progress`**
+
+| Column | Storage | Encoding / semantics |
+|---|---|---|
+| `card_id` | INTEGER | References `cards.id` |
+| `mode` | TEXT | Exactly `recognize` (Video → Word) or `produce` (Word → Sign) |
+| `ease_factor` | REAL | SM‑2 ease, rounded to 2 decimals, ≥ 1.3 (default 2.5) |
+| `interval_days` | REAL | Current interval in **days**, may be fractional: `0` = never reviewed, `0.041666…` (= 1/24) = after a lapse, `1`, `6`, then values rounded to 2 decimals |
+| `repetitions` | INTEGER ≥ 0 | Consecutive successful reviews |
+| `lapses` | INTEGER ≥ 0 | Total number of `again` grades |
+| `due_at` | TEXT | Next review time (format below) |
+| `last_reviewed_at` | TEXT or NULL | NULL if never reviewed in this mode |
+
+**Timestamp format.** All timestamps are UTC in ISO‑8601 extended format with an explicit `+00:00` offset:
+- with microseconds: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`, e.g. `2026-11-06T08:22:09.169304+00:00`;
+- when the microsecond part is exactly zero, the fraction is left out: `YYYY-MM-DDTHH:MM:SS+00:00`.
+
+The application finds due cards and orders them by **comparing these strings as text**. Anything that writes into a store must keep exactly this format: UTC, the same offset notation, no `Z` suffix and no local offsets. Otherwise due dates are compared wrongly.
+
+**Data invariants of a valid backup**
+1. Every `cards` row has **exactly two** `progress` rows, one per mode.
+2. Every `progress.card_id` refers to an existing card; there are no orphan progress rows.
+3. `cards.video_url` values are unique.
+4. `cards.video_path` values have the form `videos/<name>.mp4`.
+5. In normal operation each `video_path` has a matching `media/videos/<name>.mp4` entry in the archive. This is **not guaranteed** ([§11.2.6](#1126-consistency-guarantees)).
+
+#### 11.2.5 Entries `media/videos/*.mp4`
+
+| Property | Value |
+|---|---|
+| Content | The video bytes **exactly as downloaded** from Elix: no transcoding, resizing or metadata changes |
+| Container | MP4 (as served by Elix) |
+| Name | `{slug}-{k}.mp4`, as defined in [§8 US‑D3](#us-d3--keep-the-video-available-offline); the name is the link to `cards.video_path` (`videos/{name}`) |
+| Selection | Every `*.mp4` file directly in the local videos folder, **including orphan files** that no card refers to |
+| Compression | DEFLATE. MP4 is already compressed, so expect little size gain. |
+
+#### 11.2.6 Consistency guarantees
+
+| Aspect | Guarantee |
+|---|---|
+| Within the store | **Atomic**: the store snapshot reflects a single point in time, even if writes happen during export. |
+| Store vs. videos | **Not atomic**: videos are collected *after* the store snapshot. If a card is saved or deleted during export, the archive may contain a video with no card, or a card whose video is missing. |
+| Orphans | Orphan video files in the local folder are included as they are. |
+
+#### 11.2.7 Restore semantics (technical)
+
+Restoring means placing `data/flashcards.db` and `media/videos/*` back under the application root, replacing the existing files, while the application is stopped. On the next start the application:
+1. opens the store and creates any missing folders;
+2. detects the schema version and upgrades a v1 store if needed ([§12](#12-epic-h--upgrading-data-from-an-earlier-version));
+3. serves each card's video from `media/{video_path}`. A card whose video file is missing still appears, but its video does not play.
+
+#### 11.2.8 Versioning & compatibility
+
+The archive carries **no explicit version marker**. The store's version is told apart by its structure:
+
+| Version | How to recognise it | Produced by backup? | Handling |
+|---|---|---|---|
+| **v2 (current)** | `progress` table exists; `cards` has no `ease_factor` column | Yes (all backups) | Used as is |
+| **v1 (legacy, single direction)** | `cards` has the scheduling columns below; no `progress` table | No: the backup feature was introduced after v2 | Upgraded at start‑up ([§12](#12-epic-h--upgrading-data-from-an-earlier-version)) |
+
+v1 `cards` definition, for any importer that must accept data copied from a pre‑v2 installation:
+
+```sql
+CREATE TABLE cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word TEXT NOT NULL,
+    part_of_speech TEXT,
+    definition TEXT,
+    source_url TEXT,
+    video_url TEXT NOT NULL,
+    video_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    ease_factor REAL NOT NULL DEFAULT 2.5,
+    interval_days REAL NOT NULL DEFAULT 0,
+    repetitions INTEGER NOT NULL DEFAULT 0,
+    lapses INTEGER NOT NULL DEFAULT 0,
+    due_at TEXT NOT NULL,
+    last_reviewed_at TEXT
+);
+```
+
+v1 → v2 mapping: the card columns are kept; the scheduling columns become the `recognize` progress row; the `produce` row starts with the defaults (2.5 / 0 / 0 / 0), `due_at = created_at` and `last_reviewed_at = NULL`.
+
+**Compatibility requirements for any implementation**
+- **Read:** must accept v2 archives as produced today, and v1 stores.
+- **Write:** an implementation that produces backups must keep the same layout, entry names, store schema and timestamp format, so that its backups stay restorable by the reference implementation, and the other way round.
+- **Evolution:** any future change to the format should add an explicit version marker, for example a `manifest.json` entry or the store's `user_version`, rather than rely on structure detection.
+
+#### 11.2.9 Validation checklist (for an importer or a test suite)
+
+1. The file is a valid ZIP; all entry paths are relative, use `/`, and contain no `..`.
+2. Entries are limited to `data/flashcards.db` and `media/videos/*.mp4`; anything else is ignored (or rejected).
+3. `data/flashcards.db` is present and passes SQLite's integrity check.
+4. The schema is v2, or v1 (in which case it is upgraded).
+5. The invariants in [§11.2.4](#1124-entry-dataflashcardsdb) hold. Invariant 5 (matching video files) is checked and **reported as a warning**, not treated as an error.
+6. Every timestamp matches the format in §11.2.4.
 
 ---
 
@@ -497,7 +722,7 @@ The reference implementation splits a browser UI from a local service. Any imple
 | 5 | Next due card | `GET /api/review/next?mode=` | mode (default `recognize`) | `{card: Review card, next_due_at: null}` or `{card: null, next_due_at: <earliest due time or null>}` | 400 invalid mode |
 | 6 | Submit grade | `POST /api/review/{id}` | grade*, mode (default `recognize`) | Updated Review card | 400 invalid grade/mode; 404 |
 | 7 | Serve media | `GET /media/{path}` | path | video file | 404 |
-| 8 | Backup | `GET /api/backup` | — | ZIP attachment (§11) | — |
+| 8 | Backup | `GET /api/backup` | — | ZIP attachment ([§11.2](#112-technical-specification-of-the-backup-archive)) | — |
 | 9 | UI | `GET /` | — | application page | — |
 
 **Deck card** = all Card fields + `video_src` + `progress: { recognize: {...}, produce: {...} }`, each with ease_factor, interval_days, repetitions, lapses, due_at, last_reviewed_at, proficiency.
@@ -578,7 +803,12 @@ These are behaviours of the reference implementation worth a decision before re�
 6. **"again" within a session** — failed cards return after ~1 h, so they usually do not reappear in the current session despite the "same‑day retry" intent. *Add in‑session relearning?*
 7. **Proficiency after a lapse** — a lapsed card shows **Nouveau** (repetitions reset to 0) even with many lapses, which can contradict the legend's notion of "Fragile". *Evaluate `weak` before `new`?*
 8. **Hard grade advances** — `hard` moves the card forward on the normal 1 → 6 → ×EF ladder (only EF drops). *Intended?*
-9. **No restore** — backup exists but restore is manual (extract the archive). *Add in‑app import?*
+9. **No restore** — backup exists but restore is manual (extract the archive). *Add in‑app import with the validation checklist of §11.2.9?*
+15. **Backup has no version marker** — format version is inferred from the store structure. *Add `manifest.json` (format version, app version, export time, counts) or set the store's `user_version`.*
+16. **Backup not atomic across store and videos** — a card saved or deleted during export can leave a missing or orphan video in the archive. *Collect videos from the snapshot's `video_path` list instead of the folder listing?*
+17. **Orphan videos are backed up** — files no card refers to (e.g. left by failed saves) are included. *Include only referenced videos?*
+18. **Backup built in memory** — memory use grows with the size of the video library. *Stream the archive?*
+19. **Timestamps compared as text** — the omitted microsecond fraction (when it is zero) makes text order differ very slightly from time order within the same second. *Normalise to a fixed‑width format?*
 10. **No card editing** — word/definition cannot be edited after saving; no tags, decks, search or sort in "Mes cartes".
 11. **Suggestion click in list mode** — searches the suggestion without updating the list position/word display.
 12. **Session counting with "all"** — progress shows only a running count; no total of due cards is shown beforehand.
