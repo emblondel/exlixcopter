@@ -23,7 +23,7 @@
 13. [Domain model](#13-domain-model)
 14. [Scheduling algorithm (SM‑2 variant)](#14-scheduling-algorithm-sm2-variant)
 15. [Proficiency classification](#15-proficiency-classification)
-16. [External source: Elix dictionary extraction rules](#16-external-source-elix-dictionary-extraction-rules)
+16. [External source: Elix dictionary integration (technical)](#16-external-source-elix-dictionary-integration-technical-specification)
 17. [Service interface (functional contract)](#17-service-interface-functional-contract)
 18. [Local storage of data & media](#18-local-storage-of-data--media)
 19. [UI text catalogue (French)](#19-ui-text-catalogue-french)
@@ -125,7 +125,7 @@ Context assumptions:
 - A text field (placeholder: "Chercher un mot (ex : crier)") and a **Chercher** button. Submitting with Enter or the button triggers the search. An empty field cannot be submitted.
 - Leading/trailing whitespace is trimmed. An empty query is rejected (service returns *missing query* error).
 - While searching, the status line shows "Recherche en cours…", and previous suggestions/results are cleared.
-- The app fetches the word's Elix page (see [§16](#16-external-source-elix-dictionary-extraction-rules)) and extracts the list of meanings with their videos.
+- The app fetches the word's Elix page (see [§16](#16-external-source-elix-dictionary-integration-technical-specification)) and extracts the list of meanings with their videos.
 - On success with ≥1 meaning, the status line reads:
   `{N} vidéo(s) trouvée(s) pour « {query} ». Choisissez le bon signe pour chaque sens.`
   where **N is the number of meanings** (not the number of videos — see [§21](#21-observed-gaps-quirks--open-questions)).
@@ -677,35 +677,298 @@ Each label has its own colour, used consistently on review badges, deck badges a
 
 ---
 
-## 16. External source: Elix dictionary extraction rules
+## 16. External source: Elix dictionary integration (technical specification)
 
-The integration is read‑only and identifies itself as `Elixcopter/1.0 (personal LSF flashcard study tool)`.
+This section specifies exactly how the application gets content from the Elix dictionary: how pages and videos are requested, how the HTML is read, and the behaviour at the edges. It does not depend on any language or library. Wherever the reference behaviour depends on a library's defaults, that behaviour is spelled out so it can be reproduced.
 
-**Word page address**: `https://dico.elix-lsf.fr/dictionnaire/{url‑encoded word}`.
+> **Source of truth.** The rules below were reverse‑engineered from the reference implementation's extraction logic, and the edge cases were checked against the standard functions it relies on. The markup model in §16.4 is **inferred from the selectors** the implementation uses. It was **not** checked against a live Elix page while this spec was written (the Elix host was unreachable from the drafting environment). Before re‑implementing, capture real pages as test fixtures (§16.10).
 
-Elix serves all necessary content in the page itself (no client‑side rendering required). Extraction rules:
+### 16.1 Overview
 
-1. The page contains one or more **word sections**. Each has a **title** like `crier (v.)`.
-   - **headword** = text before the last `(`, trimmed (or the whole title if there is none);
-   - **part of speech** = text after the last `(`, with `)` removed, trimmed.
-   - Sections without a title are ignored.
-2. Each word section contains **meaning blocks**. For each:
-   - **definition** = the meaning's heading text (empty if absent);
-   - **source URL** = the meaning's "source" link if present, else the word page URL;
-   - **video URLs** = every video in the meaning's video area, resolved to absolute URLs against the Elix base URL, in page order.
-   - Meaning blocks with **no video** are skipped.
-3. If no meaning was retained, **suggestions** = text of each link in the page's suggestions block whose target is a dictionary entry (`/dictionnaire/…`), non‑empty, de‑duplicated preserving order, max 20.
+| Aspect | Value |
+|---|---|
+| Base URL | `https://dico.elix-lsf.fr` (HTTPS only) |
+| Access | Read‑only, anonymous, no API key. Server‑rendered HTML scraped directly; Elix publishes no API that the app uses. |
+| Why plain HTTP is enough | Elix puts the word, part of speech, definitions and `<video src>` URLs directly in the HTML it sends. No JavaScript execution or headless browser is needed. |
+| Number of calls | **1** HTTP request per lookup (the word page) and **1** per saved card (the video). Nothing is crawled, prefetched or paginated. |
+| Where calls are made | Server side only (the local service), except for **preview playback** in search results: the user's browser streams candidate videos directly from Elix (hotlinking) until they are saved. |
 
-**Lookup result** (functional shape):
+### 16.2 Pipeline
+
 ```
-{ word: <the user's query>, url: <word page URL>,
-  meanings: [ { word, part_of_speech, definition, source_url, video_urls[] } ],
-  suggestions: [ text ],
-  saved: { <video_url>: <card id> }   // only URLs already saved
+query ──trim──► build word URL ──GET──► HTTP status check ──► decode text
+      ──► parse HTML (lenient) ──► extract word sections ──► extract meanings
+      ──► (if no meaning) extract suggestions ──► lookup result
+      ──► (service) annotate with already-saved card ids ──► client
+```
+
+### 16.3 Requesting a word page
+
+**URL construction**
+
+`{BASE_URL}/dictionnaire/{encode(query)}`
+
+- `query` is the user's input with leading and trailing whitespace removed. It is **not** lower‑cased, normalised or otherwise changed. (Word‑list mode lower‑cases its items itself before searching; see Epic C.)
+- `encode` is percent‑encoding of the **UTF‑8** bytes. Unreserved characters `A–Z a–z 0–9 - . _ ~` are kept as is, and **`/` is also kept unencoded**. Every other byte becomes `%XX` (uppercase hex).
+
+| Query | Path segment sent |
+|---|---|
+| `crier` | `crier` |
+| `pomme de terre` | `pomme%20de%20terre` (space → `%20`, never `+`) |
+| `aujourd'hui` | `aujourd%27hui` |
+| `été` | `%C3%A9t%C3%A9` |
+| `c'est-à-dire` | `c%27est-%C3%A0-dire` |
+| `Crier?` | `Crier%3F` |
+| `a/b` | `a/b` ← **not encoded**; produces an extra path segment (see §16.9) |
+
+The resulting URL is also returned as `url` in the lookup result. It serves as the default `source_url` of every meaning on that page.
+
+**HTTP request**
+
+| Property | Value |
+|---|---|
+| Method | `GET` |
+| `User-Agent` | `Elixcopter/1.0 (personal LSF flashcard study tool)` |
+| Other headers | Only the HTTP client's generic defaults (e.g. `Accept: */*`, `Accept-Encoding: gzip, deflate`, `Connection: keep-alive`). No cookies, no `Referer`, no `Accept-Language`. |
+| Redirects | Followed automatically. The extraction runs on the final page, but `url` keeps the **originally built** URL. |
+| Timeout | **15 s**, applied separately to the connection phase and to each wait for data. It is not a limit on the total download time. |
+| Retries | None |
+| Caching | None: every lookup hits Elix, even for a word just searched. |
+| Connection reuse | None required (the reference opens a fresh connection per lookup). |
+| Rate limiting | None in code. The natural pace is one request per user action. |
+| Proxy / TLS | Standard system proxy settings and certificate verification. Verification is never disabled. |
+
+**Response handling**
+
+| Outcome | Behaviour |
+|---|---|
+| Status 2xx | Continue to decoding. |
+| Status 4xx / 5xx | **Lookup failure.** The service answers `502` with `{"error": "<message>"}`, where the message is the HTTP client's technical text (e.g. `404 Client Error: Not Found for url: https://dico.elix-lsf.fr/dictionnaire/xyz`). The UI shows it verbatim. |
+| Network error / DNS / TLS / timeout | Same: `502` with the error text. |
+| Parse problems | The parser is lenient and never fails on malformed HTML. Unexpected structure just yields fewer or no meanings (§16.5). |
+
+> ⚠️ **Assumption:** for a word with no exact entry, Elix answers **2xx** with a page that contains a suggestions block. If Elix answered 404 instead, suggestions would never be shown and the user would see a lookup error. Confirm with fixtures.
+
+**Text decoding**
+- Use the charset declared in the `Content-Type` response header.
+- The reference falls back to automatic detection when no charset is declared, and to ISO‑8859‑1 for `text/*` without a charset. The expected encoding from Elix is **UTF‑8**. A re‑implementation should honour, in order: the header charset, then the HTML `<meta charset>`, then UTF‑8.
+- Content compression (gzip/deflate) is undone transparently.
+
+### 16.4 Expected markup model
+
+The extractor depends only on the following structure. Element types matter only where a selector names them (`section`, `h2`, `article`, `header`, `h3`, `a`, `video`). Class names and ids are matched **exactly and case‑sensitively**, as one class among possibly several.
+
+```html
+<!-- one per headword / grammatical category (homographs = several sections) -->
+<section class="word">
+  <h2 class="word__title">crier <span>(v.)</span></h2>
+
+  <!-- one per meaning -->
+  <article class="meaning-renderer">
+    <header>
+      <h3>Pousser des cris.</h3>              <!-- definition -->
+    </header>
+    <a class="source" href="…">…</a>            <!-- optional: link to the meaning -->
+    <div class="meaning-videos">
+      <video src="/…/sign-1.mp4"></video>       <!-- one per sign variant -->
+      <video src="/…/sign-2.mp4"></video>
+    </div>
+  </article>
+
+  <article class="meaning-renderer">…</article>
+</section>
+
+<!-- present when there is no exact match -->
+<section id="suggestions">
+  <a href="/dictionnaire/crie">crié</a>
+  <a href="/dictionnaire/cri">cri</a>
+</section>
+```
+
+**Selector reference** (CSS syntax; whitespace means "descendant at any depth")
+
+| # | Scope | Selector | Cardinality used | Purpose |
+|---|---|---|---|---|
+| S1 | document | `section.word` | all, document order | Word sections |
+| S2 | each S1 | `h2.word__title` | **first** match | Headword + POS |
+| S3 | each S1 | `article.meaning-renderer` | all, document order | Meanings |
+| S4 | each S3 | `header h3` | **first** match | Definition |
+| S5 | each S3 | `a.source` | **first** match, attribute `href` | Source link |
+| S6 | each S3 | `.meaning-videos video[src]` | all, document order, attribute `src` | Sign videos |
+| S7 | document | `section#suggestions a` | all, document order | Suggestions |
+
+"First match" means the first element in document order among all descendants (depth‑first, pre‑order).
+
+### 16.5 Extraction algorithm
+
+**Text extraction function `text(el)`**, used for every textual field:
+1. Collect all descendant **text nodes** of `el` in document order. Markup and comments are dropped; HTML entities are decoded (`&eacute;` → `é`, `&nbsp;` → U+00A0).
+2. Strip leading and trailing whitespace from **each** text node, and drop nodes that end up empty.
+3. Join the remaining pieces with a **single space**.
+
+Consequences (verified):
+- Whitespace **inside** a text node is **not** collapsed: `<h3>Pousser   des <b>cris</b>.</h3>` gives `Pousser   des cris .`
+- Element boundaries add a space, even before punctuation: `…<b>cris</b>.` gives `cris .`
+- `<h2> crier <span>( v. )</span></h2>` gives `crier ( v. )`.
+
+**Algorithm**
+
+```
+meanings ← []
+for each section in S1(document):
+    title_el ← first S2(section)
+    if title_el is absent: continue                      # section ignored
+    title ← text(title_el)
+
+    # split headword / part of speech on the LAST "("
+    (before, sep, after) ← partition title at last occurrence of "("
+    if sep found:
+        headword ← trim(before)
+        pos      ← trim(after with every ")" removed)
+        if headword = "": headword ← title
+    else:                                                # no "(" in title
+        headword ← title
+        pos      ← trim(title with every ")" removed)    # ⚠ quirk §16.9-Q1
+
+    for each article in S3(section):
+        h3 ← first S4(article)
+        definition ← text(h3) if h3 present else ""
+
+        a ← first S5(article)
+        source_url ← a.href (raw attribute value, NOT resolved)
+                     if a present and has href, else word_url
+
+        video_urls ← [ resolve(BASE_URL, v.src) for v in S6(article) ]
+        if video_urls is empty: continue                 # meaning skipped
+
+        meanings.append({ word: headword, part_of_speech: pos,
+                          definition, source_url, video_urls })
+
+suggestions ← []
+if meanings is empty:
+    for each a in S7(document):
+        t ← text(a);  h ← a.href or ""
+        if t ≠ "" and h starts with "/dictionnaire/": suggestions.append(t)
+    suggestions ← dedupe_keep_first(suggestions)[0:20]
+
+return { word: query, url: word_url, meanings, suggestions }
+```
+
+**Headword / POS split examples** (verified)
+
+| Title text | headword | part_of_speech |
+|---|---|---|
+| `crier (v.)` | `crier` | `v.` |
+| `crier ( v. )` | `crier` | `v.` |
+| `(se) moquer (v. pron.)` | `(se) moquer` | `v. pron.` |
+| `avoir (n.) (fam.)` | `avoir (n.)` | `fam.` (only the **last** group is the POS) |
+| `crier` (no parenthesis) | `crier` | `crier` ⚠ (POS = whole title; see Q1) |
+| `(v.)` | `(v.)` | `v.` (empty headword falls back to the title) |
+
+**URL resolution `resolve(BASE_URL, src)`.** Standard relative‑reference resolution (RFC 3986) against the **site root** `https://dico.elix-lsf.fr`, **not** against the page URL:
+
+| `src` value | Resolved |
+|---|---|
+| `/media/x.mp4` | `https://dico.elix-lsf.fr/media/x.mp4` |
+| `x.mp4` | `https://dico.elix-lsf.fr/x.mp4` (root, not `/dictionnaire/x.mp4`) |
+| `../x.mp4` | `https://dico.elix-lsf.fr/x.mp4` |
+| `//cdn.example/x.mp4` | `https://cdn.example/x.mp4` |
+| `https://other/x.mp4` | unchanged |
+| `""` (empty) | `https://dico.elix-lsf.fr` ⚠ (Q4) |
+
+**Field rules summary**
+
+| Field | Origin | Empty allowed | Normalisation |
+|---|---|---|---|
+| `word` (per meaning) | S2 → headword | no (falls back to title) | trim only; case kept |
+| `part_of_speech` | S2 → last `( … )` | yes | `)` removed, trimmed |
+| `definition` | S4 | yes | `text()` |
+| `source_url` | S5 `href` raw | no (fallback word URL) | none; **may be relative** (Q3) |
+| `video_urls` | S6 `src` | no (meaning skipped) | resolved to absolute; **not** de‑duplicated |
+| `suggestions[]` | S7 link **text** | — | `text()`; exact case‑sensitive de‑dupe; max 20 |
+
+**Ordering guarantees:** meanings follow the order of word sections and then of articles within each section. Videos follow `<video>` order. Suggestions follow link order. The UI shows candidates in exactly this order.
+
+**What is deliberately ignored:** everything outside the selectors above. That includes `<source>` children of `<video>`, `poster` images, `data-*` attributes, example sentences, illustrations, regional variants not exposed as `<video src>`, and pagination or navigation.
+
+### 16.6 Suggestions: semantics
+
+- A suggestion's value is the link's **visible text**, not its `href`. Clicking a suggestion runs a **new lookup** with that text, which is encoded again (§16.3). If Elix's link text and slug differ (e.g. accents, homograph numbering), the new lookup may hit a different URL than the link pointed to.
+- Only **root‑relative** links starting with `/dictionnaire/` are kept. Absolute links to the same site (`https://dico.elix-lsf.fr/dictionnaire/…`) are **rejected**.
+- Suggestions are computed **only** when no meaning was retained. A page that has entries but no videos counts as no match, so it shows suggestions.
+
+### 16.7 "Already saved" annotation
+
+After extraction, the service collects the set of every resolved video URL across all meanings. It looks up the cards whose stored `video_url` **equals one of them as an exact string**, and adds `saved: { <video_url>: <card id> }` to the result, listing only the matches. No URL normalisation is applied (case, trailing slash, query string). If Elix changes a video's URL, for example by adding a cache‑busting query, the video is no longer recognised as saved.
+
+**Lookup result returned to the client**
+```json
+{
+  "word": "crier",
+  "url": "https://dico.elix-lsf.fr/dictionnaire/crier",
+  "meanings": [
+    {
+      "word": "crier",
+      "part_of_speech": "v.",
+      "definition": "Pousser des cris.",
+      "source_url": "https://dico.elix-lsf.fr/…",
+      "video_urls": ["https://dico.elix-lsf.fr/…/1.mp4", "https://dico.elix-lsf.fr/…/2.mp4"]
+    }
+  ],
+  "suggestions": [],
+  "saved": { "https://dico.elix-lsf.fr/…/2.mp4": 12 }
 }
 ```
+`word` echoes the trimmed query, not the headword. `suggestions` is always `[]` when `meanings` is non‑empty. `saved` is `{}` when nothing matches.
 
-**Video download**: plain fetch of the video URL, streamed to the local file; timeout 30 s; failure aborts card creation.
+### 16.8 Downloading a video (on save)
+
+| Property | Value |
+|---|---|
+| Trigger | Create‑card operation, after the duplicate check, before the card is recorded |
+| Input | `video_url` as received from the client. **No check** that it belongs to Elix (see Q8). |
+| Method / headers | `GET`, same `User-Agent` as §16.3 |
+| Redirects | Followed |
+| Timeout | **30 s**, applied separately to connecting and to each wait for data. A large file may take longer overall. |
+| Status check | Done **before** the local file is created. A 4xx/5xx creates no file and aborts card creation. |
+| Body handling | Streamed in chunks of **64 KiB**, written sequentially to `media/videos/{slug}-{k}.mp4`. The file is created or truncated. Empty keep‑alive chunks are skipped. |
+| Validation | None: no check of `Content-Type`, size limit, checksum or MP4 signature. Whatever bytes are served are stored as `.mp4`. |
+| Failure mid‑stream | An exception aborts card creation, but the **partial file is left on disk** (Q6). |
+| Error reporting | Errors raised by the download are not specifically handled, so they surface as a generic server error. The UI shows "Erreur — réessayer". |
+
+### 16.9 Edge cases & known quirks
+
+| Id | Situation | Current behaviour | Recommendation |
+|---|---|---|---|
+| Q1 | Title without `(` | POS = whole title (e.g. `crier`) | POS should be `""` |
+| Q2 | Query containing `/` | Not encoded; requests a deeper path, likely an error or a wrong page | Encode `/` as `%2F` |
+| Q3 | Relative `a.source` href | Stored as is, so it is not a working absolute link | Resolve against the page URL |
+| Q4 | `<video src="">` | Turns into the site root URL, which becomes a bogus candidate; saving would download HTML as `.mp4` | Ignore empty `src` |
+| Q5 | `<video>` with only `<source>` children | Not detected; that meaning may be skipped | Also read `video > source[src]` |
+| Q6 | Download interrupted | Partial file left behind; orphan later included in backups | Write to a temp file, then rename on success |
+| Q7 | Same video under two meanings | Shown twice; after one is saved, both show "already saved" | De‑duplicate or tolerate |
+| Q8 | Arbitrary `video_url` in create‑card | Any URL is fetched by the local service | Restrict to the Elix host(s) |
+| Q9 | No‑match page returned as 404 | Error shown instead of suggestions | Treat 404 as "no match" and still parse suggestions |
+| Q10 | Elix redesign (class names change) | Silent: lookups return "no exact result" with no suggestions | Detect "no `section.word` and no `#suggestions`" and report "page format not recognised" |
+| Q11 | Whitespace in definitions | Internal runs of spaces/newlines kept; space before punctuation after inline tags | Collapse whitespace runs |
+| Q12 | Lookup error messages | Technical English client messages shown to a French UI | Map to French user messages |
+
+### 16.10 Conformance test fixtures (recommended)
+
+A re‑implementation should ship saved HTML fixtures and assert the extracted result for at least:
+
+1. A word with **one** section, **one** meaning, **one** video.
+2. A word with **several meanings**, one of them with **several variants**.
+3. **Homographs**: several `section.word` with different POS.
+4. A meaning **without video**, which must be skipped.
+5. A **no‑match** page with suggestions, including duplicate links and more than 20 links (check de‑dupe and cap), links not under `/dictionnaire/`, and an absolute link.
+6. Titles from the §16.5 split table, including the no‑parenthesis case.
+7. `src` values from the §16.5 resolution table.
+8. Accented and multi‑word queries (URL encoding table, §16.3).
+9. HTTP 404 / 500 / timeout, which must map to a lookup failure.
+10. Video download: 200 (file written), 404 (no file, no card), stream cut mid‑way.
+
+Fixtures should be refreshed periodically against the live site to detect markup changes early.
 
 ---
 
@@ -715,7 +978,7 @@ The reference implementation splits a browser UI from a local service. Any imple
 
 | # | Operation | Reference form | Input | Success | Errors |
 |---|---|---|---|---|---|
-| 1 | Look up word | `GET /api/search?q=` | query | Lookup result (§16) | 400 missing query; 502 lookup failure |
+| 1 | Look up word | `GET /api/search?q=` | query | Lookup result ([§16.7](#167-already-saved-annotation)) | 400 missing query; 502 lookup failure |
 | 2 | Create card | `POST /api/cards` | word*, video_url*, definition, part_of_speech, source_url | 201 Deck card | 400 missing fields; 409 duplicate video (+ existing id) |
 | 3 | List cards | `GET /api/cards` | — | Deck cards, newest first | — |
 | 4 | Delete card | `DELETE /api/cards/{id}` | id | `{ok: true}` | 404 |
@@ -813,4 +1076,4 @@ These are behaviours of the reference implementation worth a decision before re�
 11. **Suggestion click in list mode** — searches the suggestion without updating the list position/word display.
 12. **Session counting with "all"** — progress shows only a running count; no total of due cards is shown beforehand.
 13. **Concurrency** — single‑user assumption; no protection against two simultaneous saves of the same video beyond the duplicate check.
-14. **Dependency on Elix markup** — extraction relies on Elix's page structure; any redesign breaks lookups. *Monitor / make extraction rules configurable?*
+14. **Dependency on Elix markup** — extraction relies on Elix's page structure; any redesign breaks lookups. See the Elix‑specific quirks Q1–Q12 in [§16.9](#169-edge-cases--known-quirks).
